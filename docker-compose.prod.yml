@@ -1,0 +1,165 @@
+version: '3.8'
+
+# Production Docker Compose Configuration
+# Optimized for performance, security, and reliability
+
+services:
+  # Python gRPC Backend Server (Production)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+      args:
+        - BUILD_VERSION=${BUILD_VERSION:-latest}
+    image: ${REGISTRY:-local}/grpc-demo-backend:${BUILD_VERSION:-latest}
+    container_name: grpc-backend-prod
+    restart: always
+    ports:
+      - "50051:50051"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GRPC_VERBOSITY=ERROR
+      - LOG_LEVEL=INFO
+      - ENV=production
+    networks:
+      - grpc-network
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; channel = grpc.insecure_channel('localhost:50051'); channel.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Envoy Proxy (Production)
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    container_name: grpc-envoy-prod
+    restart: always
+    ports:
+      - "8080:8080"
+      - "9901:9901"
+    volumes:
+      - ./envoy/envoy.prod.yaml:/etc/envoy/envoy.yaml:ro
+      - envoy-certs:/etc/envoy/certs:ro
+    command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml --log-level error
+    networks:
+      - grpc-network
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # React Frontend (Production - Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        - REACT_APP_GRPC_WEB_URL=${GRPC_WEB_URL:-https://api.example.com}
+        - BUILD_VERSION=${BUILD_VERSION:-latest}
+    image: ${REGISTRY:-local}/grpc-demo-frontend:${BUILD_VERSION:-latest}
+    container_name: grpc-frontend-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - nginx-certs:/etc/nginx/certs:ro
+      - ./frontend/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - grpc-network
+    depends_on:
+      - envoy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: grpc-redis-prod
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    networks:
+      - grpc-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: grpc-postgres-prod
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=grpc_tasks
+      - POSTGRES_USER=grpc_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - grpc-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grpc_user -d grpc_tasks"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  grpc-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  envoy-certs:
+    driver: local
+  nginx-certs:
+    driver: local

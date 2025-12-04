@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # Python gRPC Backend Server
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    container_name: grpc-backend
+    ports:
+      - "50051:50051"  # gRPC port
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GRPC_VERBOSITY=INFO
+      - GRPC_TRACE=all
+    networks:
+      - grpc-network
+    volumes:
+      - ./backend:/app
+      - ./proto:/app/proto
+    command: python server.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; channel = grpc.insecure_channel('localhost:50051'); channel.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Envoy Proxy
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    container_name: grpc-envoy
+    ports:
+      - "8081:8080"   # gRPC-Web port (mapped to 8081 to avoid conflict)
+      - "9901:9901"   # Admin interface
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+    command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml
+    networks:
+      - grpc-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # React Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: ./frontend/Dockerfile
+    container_name: grpc-frontend
+    ports:
+      - "3001:3000"
+    environment:
+      - REACT_APP_GRPC_WEB_URL=http://localhost:8081
+      - NODE_ENV=development
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./proto:/app/proto
+    networks:
+      - grpc-network
+    depends_on:
+      - envoy
+    command: npm start
+
+  # Optional: Protocol Buffer Code Generation
+  protogen:
+    build:
+      context: .
+      dockerfile: Dockerfile.protogen
+    container_name: grpc-protogen
+    volumes:
+      - ./proto:/proto
+      - ./backend/generated:/backend/generated
+      - ./frontend/src/generated:/frontend/generated
+      - ./scripts:/scripts
+    command: /scripts/generate_all_protos.sh
+    networks:
+      - grpc-network
+
+  # Optional: Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: grpc-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - grpc-network
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grpc-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - grpc-network
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+networks:
+  grpc-network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:

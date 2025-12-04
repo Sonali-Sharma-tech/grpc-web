@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package taskservice;
+
+// Import timestamp for date/time fields
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// Service definition for Task Management
+service TaskService {
+  // Unary RPC: Standard request-response pattern
+  rpc CreateTask(CreateTaskRequest) returns (Task) {}
+
+  // Unary RPC: Get a single task by ID
+  rpc GetTask(GetTaskRequest) returns (Task) {}
+
+  // Unary RPC: Update an existing task
+  rpc UpdateTask(UpdateTaskRequest) returns (Task) {}
+
+  // Unary RPC: Delete a task
+  rpc DeleteTask(DeleteTaskRequest) returns (google.protobuf.Empty) {}
+
+  // Unary RPC: List all tasks with optional filtering
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse) {}
+
+  // Server Streaming RPC: Watch for task updates in real-time
+  rpc WatchTasks(WatchTasksRequest) returns (stream TaskEvent) {}
+
+  // Client Streaming RPC: Bulk create tasks
+  rpc BulkCreateTasks(stream CreateTaskRequest) returns (BulkCreateResponse) {}
+
+  // Bidirectional Streaming RPC: Interactive task processing
+  rpc ProcessTaskStream(stream TaskCommand) returns (stream TaskResult) {}
+}
+
+// Core data model for a Task
+message Task {
+  // Unique identifier for the task
+  string id = 1;
+
+  // Task title (required)
+  string title = 2;
+
+  // Detailed description (optional)
+  string description = 3;
+
+  // Task status
+  TaskStatus status = 4;
+
+  // Priority level
+  Priority priority = 5;
+
+  // Task labels for categorization
+  repeated string labels = 6;
+
+  // User who created the task
+  string created_by = 7;
+
+  // User assigned to the task
+  string assigned_to = 8;
+
+  // Timestamps
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp due_date = 11;
+
+  // Custom metadata as key-value pairs
+  map<string, string> metadata = 12;
+}
+
+// Task status enumeration
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_TODO = 1;
+  TASK_STATUS_IN_PROGRESS = 2;
+  TASK_STATUS_DONE = 3;
+  TASK_STATUS_CANCELLED = 4;
+}
+
+// Priority levels
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;
+  PRIORITY_MEDIUM = 2;
+  PRIORITY_HIGH = 3;
+  PRIORITY_CRITICAL = 4;
+}
+
+// Request message for creating a task
+message CreateTaskRequest {
+  string title = 1;
+  string description = 2;
+  Priority priority = 3;
+  repeated string labels = 4;
+  string assigned_to = 5;
+  google.protobuf.Timestamp due_date = 6;
+  map<string, string> metadata = 7;
+}
+
+// Request for getting a task by ID
+message GetTaskRequest {
+  string id = 1;
+}
+
+// Request for updating a task
+message UpdateTaskRequest {
+  string id = 1;
+  // Optional fields - only update if provided
+  optional string title = 2;
+  optional string description = 3;
+  optional TaskStatus status = 4;
+  optional Priority priority = 5;
+  repeated string labels = 6;
+  optional string assigned_to = 7;
+  optional google.protobuf.Timestamp due_date = 8;
+  map<string, string> metadata = 9;
+}
+
+// Request for deleting a task
+message DeleteTaskRequest {
+  string id = 1;
+}
+
+// Request for listing tasks with filters
+message ListTasksRequest {
+  // Pagination
+  int32 page_size = 1;
+  string page_token = 2;
+
+  // Filters
+  repeated TaskStatus statuses = 3;
+  repeated Priority priorities = 4;
+  repeated string labels = 5;
+  string assigned_to = 6;
+
+  // Sorting
+  string order_by = 7; // e.g., "created_at", "priority"
+  bool descending = 8;
+}
+
+// Response for listing tasks
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  string next_page_token = 2;
+  int32 total_count = 3;
+}
+
+// Request for watching task updates
+message WatchTasksRequest {
+  // Filter criteria for which tasks to watch
+  repeated string task_ids = 1;
+  repeated TaskStatus statuses = 2;
+  repeated string labels = 3;
+
+  // Include initial state of matching tasks
+  bool include_initial = 4;
+}
+
+// Event types for task updates
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_CREATED = 1;
+  EVENT_TYPE_UPDATED = 2;
+  EVENT_TYPE_DELETED = 3;
+}
+
+// Task event for streaming updates
+message TaskEvent {
+  EventType event_type = 1;
+  Task task = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  string triggered_by = 4;
+}
+
+// Response for bulk create operation
+message BulkCreateResponse {
+  repeated Task tasks = 1;
+  int32 success_count = 2;
+  repeated BulkError errors = 3;
+}
+
+// Error details for bulk operations
+message BulkError {
+  int32 index = 1;
+  string error_message = 2;
+}
+
+// Commands for bidirectional streaming
+message TaskCommand {
+  oneof command {
+    CreateTaskRequest create = 1;
+    UpdateTaskRequest update = 2;
+    DeleteTaskRequest delete = 3;
+    GetTaskRequest get = 4;
+  }
+}
+
+// Results for bidirectional streaming
+message TaskResult {
+  bool success = 1;
+  oneof result {
+    Task task = 2;
+    string error_message = 3;
+  }
+}

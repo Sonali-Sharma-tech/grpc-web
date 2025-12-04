@@ -1,0 +1,165 @@
+# Envoy Configuration for gRPC-Web
+# This configuration enables Envoy to act as a proxy between
+# web browsers (gRPC-Web) and backend gRPC services
+
+# Admin interface configuration
+# Access at http://localhost:9901 for debugging and metrics
+admin:
+  address:
+    socket_address:
+      protocol: TCP
+      address: 0.0.0.0
+      port_value: 9901
+
+# Static configuration mode
+static_resources:
+  # Listeners define how Envoy accepts incoming connections
+  listeners:
+    - name: listener_0
+      address:
+        socket_address:
+          protocol: TCP
+          address: 0.0.0.0
+          port_value: 8080  # Port where Envoy listens for gRPC-Web requests
+      filter_chains:
+        - filters:
+            # HTTP connection manager handles HTTP/1.1 and HTTP/2
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+
+                # Codec configuration
+                codec_type: AUTO  # Automatically detect HTTP/1.1 or HTTP/2
+
+                # Statistics prefix for monitoring
+                stat_prefix: grpc_web
+
+                # Route configuration
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: local_service
+                      domains: ["*"]  # Accept requests for any domain
+
+                      routes:
+                        # Route all gRPC requests to the backend cluster
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: grpc_backend_cluster
+                            timeout: 0s  # No timeout for streaming
+
+                            # Important: Set maximum stream duration for long-lived streams
+                            max_stream_duration:
+                              grpc_timeout_header_max: 0s
+
+                          # CORS policy per route (new format)
+                          typed_per_filter_config:
+                            envoy.filters.http.cors:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                              allow_origin_string_match:
+                                - prefix: "*"
+                              allow_methods: "GET, PUT, DELETE, POST, OPTIONS"
+                              allow_headers: "keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout,authorization,ngrok-skip-browser-warning,x-client-version"
+                              expose_headers: "custom-header-1,grpc-status,grpc-message,grpc-status-details-bin"
+                              max_age: "1728000"
+                              allow_credentials: true
+
+                # HTTP filters in processing order
+                http_filters:
+                  # gRPC-Web filter: Translates between gRPC-Web and gRPC
+                  - name: envoy.filters.http.grpc_web
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
+
+                  # CORS filter: Handles preflight requests
+                  - name: envoy.filters.http.cors
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+
+                  # Router filter: Must be last
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  # Clusters define upstream services
+  clusters:
+    - name: grpc_backend_cluster
+
+      # Connection configuration
+      connect_timeout: 0.25s
+
+      # Service discovery type
+      type: LOGICAL_DNS
+      dns_lookup_family: V4_ONLY
+
+      # Load balancing policy
+      lb_policy: ROUND_ROBIN
+
+      # HTTP/2 configuration for gRPC
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options:
+              # gRPC uses HTTP/2
+              max_concurrent_streams: 1000
+              initial_stream_window_size: 65536  # 64 KiB
+              initial_connection_window_size: 1048576  # 1 MiB
+
+              # Allow custom pseudo headers required by gRPC
+              allow_connect: true
+
+      # Upstream endpoints
+      load_assignment:
+        cluster_name: grpc_backend_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: backend  # Docker service name or localhost
+                      port_value: 50051  # gRPC server port
+
+      # Health checking configuration
+      health_checks:
+        - timeout: 1s
+          interval: 5s
+          interval_jitter: 1s
+          unhealthy_threshold: 2
+          healthy_threshold: 2
+
+          # gRPC health check
+          grpc_health_check:
+            service_name: ""  # Check the default service
+
+      # Circuit breaker configuration
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 1000
+            max_pending_requests: 1000
+            max_requests: 1000
+            max_retries: 3
+
+      # Outlier detection for automatic failure detection
+      outlier_detection:
+        consecutive_5xx: 5
+        interval: 30s
+        base_ejection_time: 30s
+        max_ejection_percent: 50
+        enforcing_consecutive_5xx: 100
+        enforcing_success_rate: 100
+        success_rate_minimum_hosts: 5
+        success_rate_request_volume: 100
+
+# Layered runtime configuration
+layered_runtime:
+  layers:
+    - name: static_layer_0
+      static_layer:
+        envoy:
+          resource_limits:
+            listener:
+              example_listener_name:
+                connection_limit: 10000

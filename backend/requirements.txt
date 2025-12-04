@@ -1,0 +1,28 @@
+# gRPC and Protocol Buffers
+grpcio==1.68.1
+grpcio-tools==1.68.1
+protobuf>=5.26.1,<6.0
+
+# Async support
+grpcio-reflection==1.68.1
+aiogrpc==1.8
+
+# Database (for persistent storage)
+sqlalchemy==2.0.21
+aiosqlite==0.19.0
+
+# Utilities
+python-dateutil==2.8.2
+pydantic==2.4.2
+python-jose[cryptography]==3.3.0  # For JWT authentication
+python-dotenv==1.0.0
+
+# Logging and monitoring
+structlog==23.1.0
+prometheus-client==0.17.1
+
+# Development tools
+pytest==7.4.2
+pytest-asyncio==0.21.1
+black==23.9.1
+mypy==1.5.1

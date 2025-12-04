@@ -1,0 +1,30 @@
+# Dockerfile for Protocol Buffer Code Generation
+FROM alpine:latest
+
+# Install protobuf compiler and necessary tools
+RUN apk add --no-cache \
+    protobuf \
+    protobuf-dev \
+    python3 \
+    py3-pip \
+    nodejs \
+    npm \
+    bash
+
+# Install Python gRPC tools
+RUN pip3 install --break-system-packages grpcio-tools
+
+# Install JavaScript/gRPC-Web protoc plugins
+RUN npm install -g protoc-gen-grpc-web protoc-gen-js
+
+# Create directories
+RUN mkdir -p /proto /backend/generated /frontend/generated /scripts
+
+# Set working directory
+WORKDIR /scripts
+
+# Make scripts executable
+RUN chmod +x /scripts/*.sh || true
+
+# Default command
+CMD ["/bin/bash"]
