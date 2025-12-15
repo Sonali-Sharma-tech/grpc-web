@@ -14,6 +14,14 @@ import { Empty } from 'google-protobuf/google/protobuf/empty_pb';
 import * as grpcWeb from 'grpc-web';
 import toast from 'react-hot-toast';
 
+// Import frame parser for fetch-based streaming
+import {
+  serializeGrpcWebRequest,
+  parseBase64GrpcFrames,
+  isTrailerFrame,
+  parseTrailers,
+} from './GrpcWebFrameParser';
+
 // Import generated protobuf classes
 import {
   TaskServiceClient as GeneratedClient,
@@ -36,6 +44,13 @@ import {
 
 // Export types for use in components
 export { Task, TaskStatus, Priority, EventType, TaskEvent };
+
+/**
+ * Stream controller for fetch-based streaming
+ */
+export interface StreamController {
+  stop: () => void;
+}
 
 /**
  * Custom error class for gRPC errors
@@ -85,6 +100,7 @@ class PerformanceTracker {
  */
 export class TaskServiceClient {
   private client: GeneratedClient;
+  private hostname: string;
   private metadata: grpcWeb.Metadata;
   private performanceTracker: PerformanceTracker;
   private activeStreams: Set<grpcWeb.ClientReadableStream<any>> = new Set();
@@ -93,6 +109,8 @@ export class TaskServiceClient {
     hostname: string = 'http://localhost:8081',
     authToken?: string
   ) {
+    this.hostname = hostname;
+
     // Initialize the generated client
     this.client = new GeneratedClient(hostname, null, null);
 
@@ -360,6 +378,152 @@ export class TaskServiceClient {
     });
 
     return stream;
+  }
+
+  /**
+   * Watch for task updates using fetch + ReadableStream
+   * This provides true incremental streaming without XHR buffering
+   */
+  watchTasksFetch(
+    onEvent: (event: TaskEvent) => void,
+    options: {
+      taskIds?: string[];
+      statuses?: TaskStatus[];
+      labels?: string[];
+      includeInitial?: boolean;
+    } = {},
+    logger?: (msg: string) => void
+  ): StreamController {
+    const log = (msg: string) => {
+      if (logger) {
+        logger(msg);
+      } else {
+        console.log(msg);
+      }
+    };
+
+    const abortController = new AbortController();
+    let eventCount = 0;
+    const startTime = Date.now();
+
+    // Build the request
+    const request = new WatchTasksRequest();
+    if (options.taskIds) {
+      request.setTaskIdsList(options.taskIds);
+    }
+    if (options.statuses) {
+      request.setStatusesList(options.statuses);
+    }
+    if (options.labels) {
+      request.setLabelsList(options.labels);
+    }
+    if (options.includeInitial !== undefined) {
+      request.setIncludeInitial(options.includeInitial);
+    }
+
+    // Serialize request to gRPC-Web format
+    const requestBody = serializeGrpcWebRequest(request);
+    const url = `${this.hostname}/taskservice.TaskService/WatchTasks`;
+
+    log(`[FETCH-STREAM] Connecting to: ${url}`);
+    log(`[FETCH-STREAM] Using fetch + ReadableStream for true streaming`);
+
+    // Start heartbeat
+    const heartbeatInterval = setInterval(() => {
+      const totalSecs = Math.floor((Date.now() - startTime) / 1000);
+      log(`[FETCH-STREAM] Heartbeat: ${totalSecs}s elapsed, ${eventCount} events received`);
+    }, 30000);
+
+    // Start async fetch
+    (async () => {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/grpc-web-text',
+            'Accept': 'application/grpc-web-text',
+            'X-Grpc-Web': '1',
+            'X-User-Agent': 'grpc-web-javascript/0.1',
+            ...this.metadata,
+          },
+          body: requestBody,
+          signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        if (!response.body) {
+          throw new Error('Response body is null - streaming not supported');
+        }
+
+        log(`[FETCH-STREAM] Connected, reading stream...`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let base64Buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            log(`[FETCH-STREAM] Stream ended by server`);
+            break;
+          }
+
+          // Append new data to buffer
+          const chunk = decoder.decode(value, { stream: true });
+          base64Buffer += chunk;
+
+          // Parse complete frames from buffer
+          const { frames, remaining } = parseBase64GrpcFrames(base64Buffer);
+          base64Buffer = remaining;
+
+          for (const frame of frames) {
+            if (isTrailerFrame(frame)) {
+              // Trailer frame - contains gRPC status
+              const trailers = parseTrailers(frame);
+              log(`[FETCH-STREAM] Trailers: code=${trailers.code}, message=${trailers.message}`);
+            } else {
+              // Data frame - deserialize protobuf message
+              try {
+                const taskEvent = TaskEvent.deserializeBinary(frame.payload);
+                eventCount++;
+                const elapsedSecs = Math.floor((Date.now() - startTime) / 1000);
+
+                const eventType = EventType[taskEvent.getEventType()] || taskEvent.getEventType();
+                const taskId = taskEvent.getTask()?.getId() || 'unknown';
+
+                log(`[FETCH-STREAM] Event #${eventCount} (${elapsedSecs}s): ${eventType} - Task ${taskId}`);
+                onEvent(taskEvent);
+              } catch (parseErr: any) {
+                log(`[FETCH-STREAM] Parse error: ${parseErr.message}`);
+              }
+            }
+          }
+        }
+
+        log(`[FETCH-STREAM] Stream completed. Total: ${eventCount} events`);
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          log(`[FETCH-STREAM] Stream aborted by user`);
+        } else {
+          log(`[FETCH-STREAM] Error: ${err.message}`);
+          toast.error(`Stream error: ${err.message}`);
+        }
+      } finally {
+        clearInterval(heartbeatInterval);
+      }
+    })();
+
+    return {
+      stop: () => {
+        clearInterval(heartbeatInterval);
+        abortController.abort();
+        log(`[FETCH-STREAM] Stream stopped. Total events: ${eventCount}`);
+      },
+    };
   }
 
   /**
